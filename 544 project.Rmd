@@ -1,0 +1,422 @@
+---
+title: "544 project"
+date: "2023-03-11"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r include=FALSE}
+options(tinytex.verbose = TRUE)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(sf)
+library(SUMMER)
+library(tidyverse)
+library(spdep)
+library(INLA)
+library(haven)
+library(survey)
+library(janitor)
+library(sjPlot)
+
+setwd("~/Desktop/554_project/data")
+
+# Population base: De facto children age 6-59 months (PR file)
+data <- read_dta("KEPR81FL.DTA")
+
+data$hc1
+#create malaria variables
+data<-data%>%mutate(malaria=case_when(hml35 == 1|hml32 == 1 ~ 1,
+                                      hml35 == 0 & hml32 == 0 ~ 0),
+                    malaria_test =ifelse(malaria %in% c(1,0),1,0))
+
+breaks <- c(0, 12, 24, 36, 48,60)
+labels <- c("0-12", "13-24", "25-36", "37-48", "49-60")
+data$age_category <- factor(cut(data$hc1, breaks = breaks, labels = labels))
+
+
+data <-data%>%dplyr::select(hv001,hv002,hv004,hv005,hv021,hv022,hv025,age_category,hc27,hml35,hml32,malaria,malaria_test)
+
+# data prep
+data <- data %>%
+  mutate(clustid = hv001, 
+         id = hv002,
+         weight = hv005,
+         strata = hv022,
+         Sex = factor(ifelse(hc27 == 1, "Male", "Female")),
+         urban = ifelse(hv025 == 1, 1, 0)) %>%
+  dplyr::select(clustid, id, weight, strata, Sex, age_category,urban,malaria_test, malaria)
+
+head(data)
+
+# load gadm shapefile and add numeric region ID based on admin 2
+poly_adm2<- st_read(dsn = ".", layer = "gadm41_KEN_1")
+#poly_adm2 <- readRDS("~/Desktop/554_project/data/Subcounty Kenya/gadm36_KEN_2_sp.rds")
+poly_adm2$region <- 1:nrow(poly_adm2)
+
+# load GPS data from DHS
+points <- st_read(dsn=".", layer="KEGE81FL")
+
+# detect points in the DHS GPS file with mis-specified coordinates and remove them if any
+wrong.points <- which(points$LATNUM == 0.0 & points$LONGNUM == 0.0)
+if (length(wrong.points) > 0) message("Removing ", length(wrong.points), " clusters with bad GPS data.")
+data <- data[!(data$clustid %in% points$DHSCLUST[wrong.points]),]
+
+# merge cluster GPS coordinates onto cluster data then GADM location names onto data using coordinates
+data <- merge(points, data, by.y = "clustid", by.x = "DHSCLUST")
+names(data)[names(data) == "DHSCLUST"] <- "clustid"
+data <- st_join(data, poly_adm2, join = st_nearest_feature, left = T)
+
+data<-data%>%dplyr::select(clustid, id,weight, strata, NAME_1,urban, Sex, age_category,malaria_test, malaria, region)
+
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# create adjacency matrix
+library(spdep)
+library(prioritizr)
+
+
+# create neighborhood matrix for later
+admin2_mat <- poly2nb(poly_adm2)
+nb2INLA(file = "admin2_lbr.graph", admin2_mat)
+admin2_mat <- nb2mat(admin2_mat, zero.policy = TRUE)
+colnames(admin2_mat) <- rownames(admin2_mat) <- poly_adm2$NAME_1
+admin2_mat[1:10, 1:10]
+
+
+nc_df2 <- data %>% st_drop_geometry()
+
+
+library(raster)
+Kenya2<-getData("GADM", country="KE", level=1)
+
+Kenya2@data
+
+Kenya2 <- sp::merge(x = Kenya2, 
+                     y = poly_adm2[ , c("NAME_1", "region")], 
+                     by.x = c("NAME_1"), 
+                     by.y = c("NAME_1"))
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+data(Kenya2)
+library(randomcoloR)
+n <- 47
+palette <- distinctColorPalette(n)
+                 
+ggplot(data = poly_adm2) + geom_sf(aes(fill = NAME_1)) +labs(title = "Map for Kenya") + scale_fill_discrete(name = "County Name") + theme( panel.grid = element_blank(), panel.border = element_blank(), axis.ticks = element_blank(),axis.text = element_blank())
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+plot(st_geometry(poly_adm2))
+# test:
+p <- st_as_sf(data)
+plot(p, add = TRUE, col = "blue", pch = 15, cex = 0.6)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+counties <- c("Mombasa", "Kwale", "Kilifi", "Tana River", "Lamu", "Taita Taveta", "Garissa", "Wajir", "Mandera", "Marsabit", "Isiolo", "Meru", "Tharaka Nithi", "Embu", "Kitui", "Machakos", "Makueni", "Nyandarua", "Nyeri", "Kirinyaga", "Murang'a", "Kiambu", "Turkana", "West Pokot", "Samburu", "Trans Nzoia", "Uasin Gishu", "Elgeyo-Marakwet", "Nandi", "Baringo", "Laikipia", "Nakuru", "Narok", "Kajiado", "Kericho", "Bomet", "Kakamega", "Vihiga", "Bungoma", "Busia", "Siaya", "Kisumu", "Homa Bay", "Migori", "Kisii", "Nyamira","Nairobi")
+
+# create a vector of provinces in Kenya
+provinces <- c("Coast", "Coast", "Coast", "Coast", "Coast", "Coast", "North Eastern", "North Eastern", "North Eastern", "Eastern", "Eastern", "Eastern", "Eastern", "Eastern", "Eastern", "Eastern", "Eastern", "Central", "Central", "Central", "Central", "Central", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Rift Valley", "Western","Western", "Western", "Western", "Nyanza", "Nyanza", "Nyanza", "Nyanza", "Nyanza", "Nyanza","Nairobi")
+
+# create a dataframe by combining the two vectors
+kenya_county_province_df <- data.frame(county = counties, province = provinces)
+
+
+
+
+a<-nc_df2 %>% 
+  group_by(NAME_1) %>% 
+   summarise(n_cases  = n(),test =sum(malaria_test==1), malaria=sum(malaria_test==1&malaria==1), `Sampled Urban`=sum(urban==1), `Sampled rural`=sum(urban==0), cluster=length(unique(clustid)))%>% as.data.frame()
+
+
+
+descriptive <- merge(x = a, y = kenya_county_province_df[ , c("province", "county")], 
+                     by.x = c("NAME_1"), 
+                     by.y = c("county"))
+
+
+
+descriptive<- cbind(descriptive[, ncol(descriptive)], descriptive[, -ncol(descriptive)])
+names(descriptive)[1] <- "province"
+
+
+
+descriptive%>%dplyr::arrange(province,NAME_1) %>%adorn_totals(name = 'Total')%>%knitr::kable("simple")
+#tab_df(a)
+
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# remove records with missing
+nc_df2 <- subset(nc_df2, !is.na(data$malaria))
+```
+
+
+
+## Naive estimates
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# compute naive estimates and standard errors
+naive_data <- nc_df2 %>%
+  group_by(NAME_1) %>%
+  summarise(est = mean(malaria),
+            n = length(malaria)) %>%
+  mutate(se = sqrt( est * (1 - est)/n)) %>%
+  as.data.frame()
+# mapPlot() doesn't handle tibbles well, so if you're using tidyverse functionality,
+# convert your tibbles back to dataframes before plotting
+tab_df(naive_data)
+naive_data%>%knitr::kable("simple")
+
+# map of estimates
+mapPlot(data = naive_data, geo = Kenya2, variables = "est",
+    by.data = "NAME_1", by.geo = "NAME_1", legend.label = "Naive Est.",
+    is.long = FALSE) +
+   ggtitle("Naive Estimates") +
+   theme(strip.background = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         panel.border = element_blank(),
+         strip.text.x = element_blank())
+
+
+# map of standard errors
+mapPlot(data = naive_data, geo = Kenya2, variables = "se",
+    by.data = "NAME_1", by.geo = "NAME_1", legend.label = "SE",
+    is.long = FALSE) +
+   ggtitle("Standard Errors (naive estimates)") +
+   theme(strip.background = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         panel.border = element_blank(),
+         strip.text.x = element_blank())
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## direct estimate(HT), WEIGHTED ESTIMATE
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+design <- svydesign(ids = ~1, weights = ~weight, strata = ~strata,
+                    data = nc_df2)
+direct <- svyby(~malaria, ~NAME_1, design, svymean)
+head(direct, n = 7)
+#tab_df(direct)
+direct%>%knitr::kable("simple")
+
+
+# map of weighted estimates
+mapPlot(data = direct, geo = Kenya2, variables = "malaria",
+    by.data = "NAME_1", by.geo = "NAME_1", legend.label = "Weighted Est.",
+    is.long = FALSE) +
+   ggtitle("Weighted Estimates") +
+   theme(strip.background = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         panel.border = element_blank(),
+         strip.text.x = element_blank())
+
+
+# map of standard errors
+mapPlot(data = direct, geo = Kenya2, variables = "se",
+    by.data = "NAME_1", by.geo = "NAME_1", legend.label = "SE",
+    is.long = FALSE) +
+   ggtitle("Standard Errors (weighted estimates)") +
+   theme(strip.background = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         panel.border = element_blank(),
+         strip.text.x = element_blank())
+
+```
+
+
+
+
+
+
+
+## FH-smoothed weighed
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+par(pty="s")
+muD <- mean(direct$malaria)
+sdD <- sd(direct$malaria)
+qqnorm((direct$malaria-muD)/sdD,main="")
+abline(0,1,col="red")
+
+options(survey.adjust.domain.lonely=TRUE)
+options(survey.lonely.psu="adjust")
+
+## IID
+FHmodeliid <- smoothSurvey(data = nc_df2, geo = Kenya2, Amat = NULL,
+responseType = "binary", responseVar = "malaria", strataVar = "strata",
+weightVar = "weight", regionVar = "NAME_1", clusterVar = "~clustid+id",
+CI = 0.95)
+
+## NONIID
+FHmodel <- smoothSurvey(data = nc_df2, geo = Kenya2, Amat = admin2_mat,
+responseType = "binary", responseVar = "malaria", strataVar = "strata",
+weightVar = "weight", regionVar = "NAME_1", clusterVar = "~clustid+id",
+CI = 0.95)
+
+
+# extract posterior medians and map them
+toplotFH <- FHmodel$smooth
+mapPlot(data = toplotFH, geo = Kenya2, variables = c("median"),
+labels = c("Posterior Median"), by.data = "region", by.geo = "NAME_1")+
+   ggtitle("Weighted Smoothed Estimates")+
+   theme(strip.background = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         panel.border = element_blank(),
+         strip.text.x = element_blank())
+
+toplotFH$sd <- sqrt(toplotFH$var)
+mapPlot(data = toplotFH, geo = Kenya2, variables = c("sd"),labels = c("Posterior sd"),
+ by.data = "region", by.geo = "NAME_1")+
+  ggtitle("Standard deviation (weighted smoothed estimates)")+
+   theme(strip.background = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         panel.border = element_blank(),
+         strip.text.x = element_blank())
+
+
+FHmodel$smooth[,c(1,2,3,4)]%>% as.data.frame()%>%mutate_if(is.numeric, round, 2)%>% knitr::kable("simple")
+
+```
+Below, we provide a quantile-quantile plot comparing the direct estimates to a Gaussian distribution. Here the observed quantiles align well with those from a Gaussian distribution, which lends no support to the basic IID model.
+
+
+
+
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+
+collect<-data.frame(region = toplotFH$region,
+           naive = (naive_data$est * 100) %>% round(1),
+           weighted = (direct$malaria * 100) %>% round(1),
+           smoothed_weighted = (toplotFH$median * 100) %>% round(1))
+
+
+
+collect <- merge(x = collect, 
+                     y = kenya_county_province_df[ , c("province", "county")], 
+                     by.x = c("region"), 
+                     by.y = c("county"))
+
+
+
+collect <- cbind(collect[, ncol(collect)], collect[, -ncol(collect)])
+names(collect)[1] <- "province"
+
+collect%>%dplyr::arrange(province, smoothed_weighted) %>%knitr::kable("simple")
+
+
+
+```
+
+
+
+```{r}
+# plot point estimates against each other
+data.frame(direct = direct$malaria, naive = naive_data$est) %>%
+  ggplot(aes(naive, direct)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red") +
+  coord_fixed() +
+  xlab("Naive estimate") +
+  ylab("Weighted estimate")
+
+# plot standard errors against each other
+data.frame(direct = direct$se, naive = naive_data$se) %>%
+  ggplot(aes(naive, direct)) +
+  geom_point() +
+  xlab("Naive estimate SE") +
+  ylab("Weighted estimate SE") +
+  xlim (0, 0.07) +
+  ylim (0, 0.07) +
+  geom_abline(slope = 1, intercept = 0, col = "red")
+
+
+# plot point estimates against each other
+data.frame(smoothed = toplotFH$median, weighted = direct$malaria) %>%
+  ggplot(aes(weighted, smoothed)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red") +
+  xlab("Weighted estimate") +
+  ylab("Smoothed weighted estimate")
+
+
+# plot standard error and posterior sd against each other
+data.frame(smoothed = toplotFH$sd, weighted = direct$se) %>%
+  ggplot(aes(weighted, smoothed)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red") +
+  xlab("Weighted estimate") +
+  ylab("Smoothed weighted estimate")
+
+```
+
+
+
+
+
+
+```{r}
+library(table1)
+
+pvalue <- function(x, ...) {
+  y <- unlist(x)
+  g <- factor(rep(1:length(x), times=sapply(x, length))) 
+  if (is.numeric(y)) {
+        # For numeric variables, Welch's Two Sample t-test
+  p <- t.test(y ~ g)$p.value 
+  } else {
+        # For categorical variables, Pearson's Chi-squared Test
+        p <- chisq.test(table(y, g))$p.value
+    }
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+destable<-nc_df2
+destable <- merge(x = destable, 
+                     y = kenya_county_province_df[ , c("province", "county")], 
+                     by.x = c("NAME_1"), 
+                     by.y = c("county"))
+destable$malaria <- factor(destable$malaria, levels=c(0,1),
+         labels=c("Malaria Negative","Malaria Positive"))
+destable$urban <- factor(destable$urban, levels=c(0,1),labels=c("Rural", "Urban"))
+table1_CMB<-table1(~ age_category+Sex+urban+province| malaria, data = destable, extra.col=list(`P-value`=pvalue))
+table1_CMB
+knitr::kable(table1_CMB)
+
+```
+\newpage
+# Appendix: All code for this report
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
