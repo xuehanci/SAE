@@ -26,10 +26,14 @@ library(janitor)
 library(sjPlot)
 
 setwd("~/Desktop/554_project/data")
-
 # Population base: De facto children age 6-59 months (PR file)
 data <- read_dta("KEPR81FL.DTA")
+```
 
+
+##-----------------------------------Data Preparation----------------------------##
+
+```{r}
 data$hc1
 #create malaria variables
 data<-data%>%mutate(malaria=case_when(hml35 == 1|hml32 == 1 ~ 1,
@@ -108,6 +112,7 @@ Kenya2 <- sp::merge(x = Kenya2,
 
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Map of Kenya with county name- figure 1
 data(Kenya2)
 library(randomcoloR)
 n <- 47
@@ -117,14 +122,16 @@ ggplot(data = poly_adm2) + geom_sf(aes(fill = NAME_1)) +labs(title = "Map for Ke
 ```
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Map of Kenya with MIS Cluster locations and county boundaries- figure 2
 plot(st_geometry(poly_adm2))
 # test:
 p <- st_as_sf(data)
 plot(p, add = TRUE, col = "blue", pch = 15, cex = 0.6)
 ```
 
-```{r echo=FALSE, message=FALSE, warning=FALSE}
 
+##---------------------------CREATE DATAFRAME FOR BUILDING MODELS-----------------------------##
+```{r echo=FALSE, message=FALSE, warning=FALSE}
 counties <- c("Mombasa", "Kwale", "Kilifi", "Tana River", "Lamu", "Taita Taveta", "Garissa", "Wajir", "Mandera", "Marsabit", "Isiolo", "Meru", "Tharaka Nithi", "Embu", "Kitui", "Machakos", "Makueni", "Nyandarua", "Nyeri", "Kirinyaga", "Murang'a", "Kiambu", "Turkana", "West Pokot", "Samburu", "Trans Nzoia", "Uasin Gishu", "Elgeyo-Marakwet", "Nandi", "Baringo", "Laikipia", "Nakuru", "Narok", "Kajiado", "Kericho", "Bomet", "Kakamega", "Vihiga", "Bungoma", "Busia", "Siaya", "Kisumu", "Homa Bay", "Migori", "Kisii", "Nyamira","Nairobi")
 
 # create a vector of provinces in Kenya
@@ -135,14 +142,13 @@ kenya_county_province_df <- data.frame(county = counties, province = provinces)
 
 
 
-
-a<-nc_df2 %>% 
+province<-nc_df2 %>% 
   group_by(NAME_1) %>% 
    summarise(n_cases  = n(),test =sum(malaria_test==1), malaria=sum(malaria_test==1&malaria==1), `Sampled Urban`=sum(urban==1), `Sampled rural`=sum(urban==0), cluster=length(unique(clustid)))%>% as.data.frame()
 
 
-
-descriptive <- merge(x = a, y = kenya_county_province_df[ , c("province", "county")], 
+#Sample allocation of clusters in each region and number of children age 0-60 months interviewed for MIS- table3 supplementary
+descriptive <- merge(x = province, y = kenya_county_province_df[ , c("province", "county")], 
                      by.x = c("NAME_1"), 
                      by.y = c("county"))
 
@@ -151,14 +157,10 @@ descriptive <- merge(x = a, y = kenya_county_province_df[ , c("province", "count
 descriptive<- cbind(descriptive[, ncol(descriptive)], descriptive[, -ncol(descriptive)])
 names(descriptive)[1] <- "province"
 
-
-
 descriptive%>%dplyr::arrange(province,NAME_1) %>%adorn_totals(name = 'Total')%>%knitr::kable("simple")
-#tab_df(a)
+#tab_df(province)
 
 ```
-
-
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
 # remove records with missing
@@ -166,10 +168,42 @@ nc_df2 <- subset(nc_df2, !is.na(data$malaria))
 ```
 
 
+## Descriptive statistics with the pooled sample of MIS data in Kenya- Table 1
+```{r}
+library(table1)
 
+pvalue <- function(x, ...) {
+  y <- unlist(x)
+  g <- factor(rep(1:length(x), times=sapply(x, length))) 
+  if (is.numeric(y)) {
+        # For numeric variables, Welch's Two Sample t-test
+  p <- t.test(y ~ g)$p.value 
+  } else {
+        # For categorical variables, Pearson's Chi-squared Test
+        p <- chisq.test(table(y, g))$p.value
+    }
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+destable<-nc_df2
+destable <- merge(x = destable, 
+                     y = kenya_county_province_df[ , c("province", "county")], 
+                     by.x = c("NAME_1"), 
+                     by.y = c("county"))
+destable$malaria <- factor(destable$malaria, levels=c(0,1),
+         labels=c("Malaria Negative","Malaria Positive"))
+destable$urban <- factor(destable$urban, levels=c(0,1),labels=c("Rural", "Urban"))
+table1_CMB<-table1(~ age_category+Sex+urban+province| malaria, data = destable, extra.col=list(`P-value`=pvalue))
+table1_CMB
+knitr::kable(table1_CMB)
+
+```
+
+
+
+##-----------------------------BUILDUNG MODELS-------------------------#
 ## Naive estimates
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
-# compute naive estimates and standard errors
+# compute naive estimates and standard errors- table 4 supplementary
 naive_data <- nc_df2 %>%
   group_by(NAME_1) %>%
   summarise(est = mean(malaria),
@@ -214,12 +248,9 @@ mapPlot(data = naive_data, geo = Kenya2, variables = "se",
 
 
 
-
-
-
-
 ## direct estimate(HT), WEIGHTED ESTIMATE
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
+# compute direct estimates and standard errors-table 5 supplementary
 design <- svydesign(ids = ~1, weights = ~weight, strata = ~strata,
                     data = nc_df2)
 direct <- svyby(~malaria, ~NAME_1, design, svymean)
@@ -268,13 +299,13 @@ abline(0,1,col="red")
 options(survey.adjust.domain.lonely=TRUE)
 options(survey.lonely.psu="adjust")
 
-## IID
+## FH-nonspatial (IID; FHmodel)
 FHmodeliid <- smoothSurvey(data = nc_df2, geo = Kenya2, Amat = NULL,
 responseType = "binary", responseVar = "malaria", strataVar = "strata",
 weightVar = "weight", regionVar = "NAME_1", clusterVar = "~clustid+id",
 CI = 0.95)
 
-## NONIID
+## FH-spatial (BYM2; svysmoothed)-indirect
 FHmodel <- smoothSurvey(data = nc_df2, geo = Kenya2, Amat = admin2_mat,
 responseType = "binary", responseVar = "malaria", strataVar = "strata",
 weightVar = "weight", regionVar = "NAME_1", clusterVar = "~clustid+id",
@@ -301,21 +332,19 @@ mapPlot(data = toplotFH, geo = Kenya2, variables = c("sd"),labels = c("Posterior
          strip.text.x = element_blank())
 
 
+# compute FH estimates and standard errors-table 6 supplementary
 FHmodel$smooth[,c(1,2,3,4)]%>% as.data.frame()%>%mutate_if(is.numeric, round, 2)%>% knitr::kable("simple")
 
 ```
-Below, we provide a quantile-quantile plot comparing the direct estimates to a Gaussian distribution. Here the observed quantiles align well with those from a Gaussian distribution, which lends no support to the basic IID model.
+In supplementary document, provide a quantile-quantile plot comparing the direct estimates to a Gaussian distribution. Here the observed quantiles align well with those from a Gaussian distribution, which lends no support to the basic IID model.
 
 
 
 
 
 
-
+## Table 2 for Malaria Prevalence in each estimation
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
-
-
-
 
 collect<-data.frame(region = toplotFH$region,
            naive = (naive_data$est * 100) %>% round(1),
@@ -343,6 +372,7 @@ collect%>%dplyr::arrange(province, smoothed_weighted) %>%knitr::kable("simple")
 
 
 ```{r}
+## -------------comparing models by scatter plots-----------##
 # plot point estimates against each other
 data.frame(direct = direct$malaria, naive = naive_data$est) %>%
   ggplot(aes(naive, direct)) +
@@ -387,34 +417,6 @@ data.frame(smoothed = toplotFH$sd, weighted = direct$se) %>%
 
 
 
-```{r}
-library(table1)
-
-pvalue <- function(x, ...) {
-  y <- unlist(x)
-  g <- factor(rep(1:length(x), times=sapply(x, length))) 
-  if (is.numeric(y)) {
-        # For numeric variables, Welch's Two Sample t-test
-  p <- t.test(y ~ g)$p.value 
-  } else {
-        # For categorical variables, Pearson's Chi-squared Test
-        p <- chisq.test(table(y, g))$p.value
-    }
-    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
-}
-destable<-nc_df2
-destable <- merge(x = destable, 
-                     y = kenya_county_province_df[ , c("province", "county")], 
-                     by.x = c("NAME_1"), 
-                     by.y = c("county"))
-destable$malaria <- factor(destable$malaria, levels=c(0,1),
-         labels=c("Malaria Negative","Malaria Positive"))
-destable$urban <- factor(destable$urban, levels=c(0,1),labels=c("Rural", "Urban"))
-table1_CMB<-table1(~ age_category+Sex+urban+province| malaria, data = destable, extra.col=list(`P-value`=pvalue))
-table1_CMB
-knitr::kable(table1_CMB)
-
-```
 \newpage
 # Appendix: All code for this report
 
